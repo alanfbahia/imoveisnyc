@@ -1,6 +1,7 @@
 import base64, gzip, json, math, re
 from pathlib import Path
 
+# trigger-v2: força execução do workflow após sua criação
 ROOT = Path(__file__).resolve().parents[1]
 FILES = [ROOT/'data2'/f'c_{i:02d}.txt' for i in range(4)] + [ROOT/'data2'/f'r_{i:02d}.txt' for i in range(6)]
 
@@ -23,15 +24,9 @@ for p in FILES:
         errors.append((p, e))
         print(f'{p.name}: falhou individualmente: {e}')
 
-# Fallback: se os blocos forem partes de um unico Base64/GZIP, tenta concatenar.
 if errors or len(rows) != 5086:
     print(f'Leitura individual resultou em {len(rows)} registros; tentando formatos alternativos...')
-    candidates = []
-    # todos concatenados
-    candidates.append(FILES)
-    # grupos c e r separados
-    candidates.append(FILES[:4])
-    candidates.append(FILES[4:])
+    candidates = [FILES, FILES[:4], FILES[4:]]
     recovered = []
     for group in candidates:
         try:
@@ -50,7 +45,6 @@ if errors or len(rows) != 5086:
 if len(rows) != 5086:
     raise SystemExit(f'ERRO: esperados 5086 registros, obtidos {len(rows)}')
 
-# Remove duplicacao exata caso um fallback tenha combinado fontes repetidas.
 seen = set(); clean = []
 for r in rows:
     k = json.dumps(r, ensure_ascii=False, separators=(',', ':'))
@@ -60,7 +54,6 @@ rows = clean
 if len(rows) != 5086:
     raise SystemExit(f'ERRO apos deduplicacao: esperados 5086, obtidos {len(rows)}')
 
-# Gera 10 JS simples, sem Base64/GZIP no navegador.
 chunk = math.ceil(len(rows)/10)
 for i in range(10):
     part = rows[i*chunk:(i+1)*chunk]
@@ -68,7 +61,6 @@ for i in range(10):
     (ROOT/f'data{i+1}.js').write_text(content, encoding='utf-8')
     print(f'data{i+1}.js: {len(part)} registros')
 
-# Atualiza index.html: remove pako e leitura data2; usa JS direto.
 idx = ROOT/'index.html'
 s = idx.read_text(encoding='utf-8')
 script_tags = '\n'.join(f'<script src="./data{i}.js?v=7"></script>' for i in range(1,11))
