@@ -87,11 +87,19 @@ button{padding:9px 11px;border:0;border-radius:7px;background:#1f5f99;color:#fff
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+<script src="./data1.js?v=8"></script>
+<script src="./data2.js?v=8"></script>
+<script src="./data3.js?v=8"></script>
+<script src="./data4.js?v=8"></script>
+<script src="./data5.js?v=8"></script>
+<script src="./data6.js?v=8"></script>
+<script src="./data7.js?v=8"></script>
+<script src="./data8.js?v=8"></script>
+<script src="./data9.js?v=8"></script>
+<script src="./data10.js?v=8"></script>
 <script>
 let DATA=[], running=false, stopFlag=false;
 const el=id=>document.getElementById(id);
-const FILES=['data2/c_00.txt','data2/c_01.txt','data2/c_02.txt','data2/c_03.txt','data2/r_00.txt','data2/r_01.txt','data2/r_02.txt','data2/r_03.txt','data2/r_04.txt','data2/r_05.txt'];
 const NAME_KEYS=['JOSE','MARIA','JOAO','ANA','SILVA','SANTOS','OLIVEIRA','ALVES'];
 
 const map=L.map('map').setView([40.7128,-74.006],10);
@@ -129,29 +137,21 @@ function applyFilters(){
  }
 }
 async function load(){
- const s=el('loadStatus');
+ const st=el('loadStatus');
  try{
-  DATA=[];
-  for(let i=0;i<FILES.length;i++){
-   s.textContent='Carregando bloco '+(i+1)+' de '+FILES.length+'…';
-   const resp=await fetch('./'+FILES[i]+'?v=5',{cache:'no-store'});
-   if(!resp.ok)throw new Error(FILES[i]+' HTTP '+resp.status);
-   const b64=(await resp.text()).trim().replace(/\s+/g,'');
-   const bytes=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));
-   const arr=JSON.parse(pako.ungzip(bytes,{to:'string'}));
-   DATA.push(...arr);
-  }
-  if(DATA.length!==5086)throw new Error('esperados 5.086 registros; carregados '+DATA.length);
+  if(!window.IMOVEIS_NYC || !Array.isArray(window.IMOVEIS_NYC)) throw new Error('arquivos data*.js nao foram carregados');
+  DATA=window.IMOVEIS_NYC;
+  if(DATA.length!==5086) throw new Error('esperados 5.086 registros; carregados '+DATA.length);
   el('total').textContent=DATA.length.toLocaleString('pt-BR');
   el('alta').textContent=DATA.filter(r=>r[1]=='Alta').length.toLocaleString('pt-BR');
   el('media').textContent=DATA.filter(r=>r[1]=='Média').length.toLocaleString('pt-BR');
   for(const r of DATA){const g=cacheGet(r);if(g?.lat)addMarker(r,g)}
   el('geo').textContent=markers.size.toLocaleString('pt-BR');
   el('bar').style.width=(markers.size/DATA.length*100)+'%';
-  s.innerHTML='<span class="ok">Base carregada com sucesso: '+DATA.length.toLocaleString('pt-BR')+' registros.</span>';
+  st.innerHTML='<span class="ok">Base carregada com sucesso: '+DATA.length.toLocaleString('pt-BR')+' registros.</span>';
   el('status').textContent='Pronto. Clique em Iniciar / continuar para posicionar os endereços ainda não geocodificados.';
   el('start').disabled=false;
- }catch(e){console.error(e);s.innerHTML='<span class="err">Erro: '+esc(e.message)+'</span>';el('status').textContent='A base não pôde ser carregada.'}
+ }catch(e){console.error(e);st.innerHTML='<span class="err">Erro ao carregar os dados: '+esc(e&&e.message?e.message:String(e))+'</span>';el('status').textContent='A base não pôde ser carregada.'}
 }
 async function geocode(r){
  const u='https://geosearch.planninglabs.nyc/v2/search?size=1&text='+encodeURIComponent(r[3]+', '+r[2]+', NY '+r[4]);
