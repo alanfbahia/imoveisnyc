@@ -66,13 +66,18 @@ for i in range(10):
 
 idx=ROOT/'index.html'
 s=idx.read_text(encoding='utf-8')
-# Remove Pako ou tags data*.js antigas e injeta a base JS direta logo apos Leaflet.
+# Remove bibliotecas/tags antigas e injeta a base JS direta e os módulos adicionais.
 s=re.sub(r'\n?<script src="https://cdn\.jsdelivr\.net/npm/pako@[^\"]+"></script>','',s)
 s=re.sub(r'\n?<script src="\./data\d+\.js\?v=\d+"></script>','',s)
-tags='\n'.join(f'<script src="./data{i}.js?v=8"></script>' for i in range(1,11))
+s=re.sub(r'\n?<script src="\./receita_matches\.js\?v=\d+"></script>','',s)
+s=re.sub(r'\n?<script src="\./enhancements\.js\?v=\d+"></script>','',s)
+tags='\n'.join(f'<script src="./data{i}.js?v=9"></script>' for i in range(1,11))
+tags += '\n<script src="./receita_matches.js?v=9"></script>\n<script src="./enhancements.js?v=9"></script>'
 leaf='<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
 s=s.replace(leaf,leaf+'\n'+tags)
 s=re.sub(r'\nconst FILES=\[[^\n]+\];','',s)
+# Marcadores maiores e com contorno branco para melhor leitura em satélite.
+s=s.replace("const m=L.circleMarker([g.lat,g.lon],{radius:5,color:col,weight:1,fillOpacity:.72});","const m=L.circleMarker([g.lat,g.lon],{radius:9,color:'#fff',fillColor:col,weight:2.5,fillOpacity:.9});")
 new_load="""async function load(){
  const st=el('loadStatus');
  try{
@@ -92,4 +97,4 @@ new_load="""async function load(){
 }"""
 s=re.sub(r'async function load\(\)\{.*?\n\}\nasync function geocode',new_load+'\nasync function geocode',s,flags=re.S)
 idx.write_text(s,encoding='utf-8')
-print('index.html atualizado para JS direto')
+print('index.html atualizado: JS direto, marcadores maiores e módulo RFB')
