@@ -1,0 +1,46 @@
+name: Cruzar nomes com Receita Federal - CNPJ QSA
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 15 * *'
+  push:
+    paths:
+      - 'scripts/cruza_receita.py'
+      - '.github/workflows/receita-qsa.yml'
+      - 'data1.js'
+      - 'data2.js'
+      - 'data3.js'
+      - 'data4.js'
+      - 'data5.js'
+      - 'data6.js'
+      - 'data7.js'
+      - 'data8.js'
+      - 'data9.js'
+      - 'data10.js'
+
+permissions:
+  contents: write
+
+jobs:
+  crossmatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cruzar proprietários NYC com QSA da Receita Federal
+        run: python scripts/cruza_receita.py
+      - name: Publicar resultado do cruzamento
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receita_matches.js
+          if git diff --cached --quiet; then
+            echo "Sem alterações no cruzamento"
+          else
+            git commit -m "Atualiza cruzamento com Receita Federal CNPJ QSA"
+            git push
+          fi
