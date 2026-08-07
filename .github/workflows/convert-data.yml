@@ -1,0 +1,33 @@
+name: Converter base do mapa
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/convert_data.py'
+      - '.github/workflows/convert-data.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Converter base compactada
+        run: python scripts/convert_data.py
+      - name: Publicar arquivos gerados
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html data1.js data2.js data3.js data4.js data5.js data6.js data7.js data8.js data9.js data10.js
+          if git diff --cached --quiet; then
+            echo "Sem alteracoes"
+          else
+            git commit -m "Converte base para JavaScript direto"
+            git push
+          fi
