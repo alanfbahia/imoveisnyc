@@ -87,16 +87,18 @@ button{padding:9px 11px;border:0;border-radius:7px;background:#1f5f99;color:#fff
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="./data1.js?v=8"></script>
-<script src="./data2.js?v=8"></script>
-<script src="./data3.js?v=8"></script>
-<script src="./data4.js?v=8"></script>
-<script src="./data5.js?v=8"></script>
-<script src="./data6.js?v=8"></script>
-<script src="./data7.js?v=8"></script>
-<script src="./data8.js?v=8"></script>
-<script src="./data9.js?v=8"></script>
-<script src="./data10.js?v=8"></script>
+<script src="./data1.js?v=9"></script>
+<script src="./data2.js?v=9"></script>
+<script src="./data3.js?v=9"></script>
+<script src="./data4.js?v=9"></script>
+<script src="./data5.js?v=9"></script>
+<script src="./data6.js?v=9"></script>
+<script src="./data7.js?v=9"></script>
+<script src="./data8.js?v=9"></script>
+<script src="./data9.js?v=9"></script>
+<script src="./data10.js?v=9"></script>
+<script src="./receita_matches.js?v=9"></script>
+<script src="./enhancements.js?v=9"></script>
 <script>
 let DATA=[], running=false, stopFlag=false;
 const el=id=>document.getElementById(id);
@@ -121,7 +123,7 @@ function shouldShow(r){const c=selectedConfs(),n=selectedNames();return c.has(r[
 function addMarker(r,g){
  if(!g?.lat||!g?.lon||markers.has(key(r)))return;
  const col=r[1]=='Alta'?'#1b7f3a':r[1]=='Média'?'#d18b00':'#6b7280';
- const m=L.circleMarker([g.lat,g.lon],{radius:5,color:col,weight:1,fillOpacity:.72});
+ const m=L.circleMarker([g.lat,g.lon],{radius:9,color:'#fff',fillColor:col,weight:2.5,fillOpacity:.9});
  m._r=r;m.bindPopup('<div style="min-width:240px"><b>'+esc(r[0])+'</b><br>'+esc(r[3])+', '+esc(r[2])+' NY '+esc(r[4])+'<hr><b>Compatibilidade:</b> '+esc(r[1])+'<br><b>Camadas:</b> '+esc(groupsFor(r).join(', '))+'<br><b>BBL:</b> '+esc(r[5])+'</div>');
  markers.set(key(r),m);
  if(shouldShow(r))m.addTo(map);
