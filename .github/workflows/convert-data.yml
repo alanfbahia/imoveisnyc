@@ -31,3 +31,4 @@ jobs:
             git commit -m "Converte base para JavaScript direto"
             git push
           fi
+# trigger-v9: aplica marcadores maiores e módulo Receita no site publicado
