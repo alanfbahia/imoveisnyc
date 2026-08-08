@@ -1,4 +1,5 @@
 import csv
+import gzip
 import io
 import json
 import re
@@ -12,12 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-# A Receita passou a servir o índice atual em /cnpj/dados_abertos_cnpj/.
-# O caminho antigo /dados/cnpj/dados_abertos_cnpj/ está retornando 404 no GitHub Actions.
-RFB_BASE = 'https://arquivos.receitafederal.gov.br/cnpj/dados_abertos_cnpj/'
-FALLBACK_MONTH = '2026-01'
+OFFICIAL_BASE = 'https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/'
+OFFICIAL_MONTH = '2026-01'
+BRASILIO_URL = 'https://data.brasil.io/dataset/socios-brasil/socios.csv.gz'
+BRASILIO_REFERENCE = '2020-09-20'
 MAX_ITEMS_PER_NAME = 20
-UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.3)'
+UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.4)'
 
 
 def norm_name(value):
@@ -26,51 +27,6 @@ def norm_name(value):
     s = s.upper()
     s = re.sub(r'[^A-Z0-9 ]+', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
-
-
-def fetch_text(url, attempts=4):
-    """Busca páginas pequenas com curl e novas tentativas."""
-    for attempt in range(1, attempts + 1):
-        print(f'Consultando {url} ({attempt}/{attempts})', flush=True)
-        cmd = [
-            'curl', '--fail', '--location', '--silent', '--show-error',
-            '--connect-timeout', '30', '--max-time', '120',
-            '--retry', '2', '--retry-delay', '8', '--retry-all-errors',
-            '--user-agent', UA, url,
-        ]
-        proc = subprocess.run(cmd, capture_output=True)
-        if proc.returncode == 0 and proc.stdout:
-            return proc.stdout.decode('utf-8', 'ignore')
-        print(
-            f'Falha ao consultar página (curl {proc.returncode}): '
-            + proc.stderr.decode('utf-8', 'ignore')[-500:],
-            flush=True,
-        )
-        if attempt < attempts:
-            time.sleep(15 * attempt)
-    raise RuntimeError(f'Falha ao consultar {url}')
-
-
-def discover_latest_month():
-    """Tenta descobrir a publicação mais nova, sem bloquear o cruzamento."""
-    try:
-        html = fetch_text(RFB_BASE, attempts=2)
-        months = sorted(set(re.findall(r'href=["\'](20\d{2}-\d{2})/["\']', html)), reverse=True)
-        for month in months[:12]:
-            try:
-                page = fetch_text(f'{RFB_BASE}{month}/', attempts=2)
-                if 'Socios0.zip' in page or 'Socios1.zip' in page:
-                    return month, page
-            except Exception as exc:
-                print('Ignorando', month, exc, flush=True)
-    except Exception as exc:
-        print('Não foi possível descobrir o mês mais recente:', exc, flush=True)
-
-    print(
-        'Usando referência de contingência', FALLBACK_MONTH,
-        'sem consultar a página do diretório.', flush=True,
-    )
-    return FALLBACK_MONTH, ''
 
 
 def read_nyc_names():
@@ -94,55 +50,48 @@ def read_nyc_names():
     return rows, owners
 
 
-def download(url, path, attempts=6):
-    """Download grande com retomada e novas tentativas."""
+def curl_download(url, path, attempts=4, connect_timeout=20, max_time=2400):
     path = Path(path)
     for attempt in range(1, attempts + 1):
         resume = path.exists() and path.stat().st_size > 0
-        print(
-            f'Download tentativa {attempt}/{attempts}: {url}' +
-            (f' | retomando de {path.stat().st_size:,} bytes' if resume else ''),
-            flush=True,
-        )
+        print(f'Download tentativa {attempt}/{attempts}: {url}', flush=True)
         cmd = [
             'curl', '--fail', '--location', '--progress-bar',
-            '--connect-timeout', '30',
-            '--max-time', '2400',
-            '--speed-time', '180', '--speed-limit', '1024',
-            '--retry', '3', '--retry-delay', '10', '--retry-all-errors',
+            '--connect-timeout', str(connect_timeout),
+            '--max-time', str(max_time),
+            '--retry', '2', '--retry-delay', '8', '--retry-all-errors',
             '--user-agent', UA,
         ]
         if resume:
             cmd += ['--continue-at', '-']
         cmd += ['--output', str(path), url]
-
         proc = subprocess.run(cmd)
-        if proc.returncode == 0:
-            if path.suffix.lower() != '.zip' or zipfile.is_zipfile(path):
-                print(f'Download concluído: {path.name} ({path.stat().st_size:,} bytes)', flush=True)
-                return
-            print(f'Arquivo inválido após download: {path.name}; reiniciando.', flush=True)
+        if proc.returncode == 0 and path.exists() and path.stat().st_size > 0:
+            print(f'Download concluído: {path.name} ({path.stat().st_size:,} bytes)', flush=True)
+            return True
+        if proc.returncode in (22, 33):
             path.unlink(missing_ok=True)
-        else:
-            print(f'curl retornou código {proc.returncode}.', flush=True)
-            # HTTP 404/403 não será corrigido com retomada de arquivo parcial.
-            if proc.returncode in (22, 33):
-                path.unlink(missing_ok=True)
-
         if attempt < attempts:
-            wait = min(20 * attempt, 90)
-            print(f'Aguardando {wait}s antes de nova tentativa...', flush=True)
-            time.sleep(wait)
-
-    raise RuntimeError(f'Falha ao baixar {url} após {attempts} tentativas')
+            time.sleep(10 * attempt)
+    return False
 
 
-def load_qualifications(month, tmpdir):
+def official_host_usable():
+    """Teste curto para não desperdiçar dezenas de minutos no runner."""
+    url = f'{OFFICIAL_BASE}{OFFICIAL_MONTH}/Qualificacoes.zip'
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / 'q.zip'
+        ok = curl_download(url, p, attempts=1, connect_timeout=15, max_time=45)
+        return bool(ok and zipfile.is_zipfile(p))
+
+
+def load_qualifications(tmpdir):
     out = {}
-    url = f'{RFB_BASE}{month}/Qualificacoes.zip'
+    url = f'{OFFICIAL_BASE}{OFFICIAL_MONTH}/Qualificacoes.zip'
     zp = Path(tmpdir) / 'Qualificacoes.zip'
+    if not curl_download(url, zp, attempts=3):
+        return out
     try:
-        download(url, zp, attempts=4)
         with zipfile.ZipFile(zp) as z:
             member = z.namelist()[0]
             with z.open(member) as raw:
@@ -151,7 +100,7 @@ def load_qualifications(month, tmpdir):
                     if len(row) >= 2:
                         out[row[0].strip()] = row[1].strip()
     except Exception as exc:
-        print('Não foi possível carregar qualificações:', exc, flush=True)
+        print('Não foi possível ler qualificações:', exc, flush=True)
     return out
 
 
@@ -162,66 +111,86 @@ def fmt_date(s):
     return s
 
 
-def process_socios(month, page_html, owners, qualifications):
-    filenames = sorted(
-        set(re.findall(r'(Socios\d+\.zip)', page_html)),
-        key=lambda x: int(re.search(r'\d+', x).group())
-    )
-    if not filenames:
-        filenames = [f'Socios{i}.zip' for i in range(10)]
-        print('Usando lista padrão Socios0.zip ... Socios9.zip', flush=True)
-
+def process_official(owners):
     totals = defaultdict(int)
     items = defaultdict(list)
     seen = defaultdict(set)
-
     with tempfile.TemporaryDirectory() as td:
-        for pos, filename in enumerate(filenames, 1):
-            url = f'{RFB_BASE}{month}/{filename}'
+        qualifications = load_qualifications(td)
+        for i in range(10):
+            filename = f'Socios{i}.zip'
+            url = f'{OFFICIAL_BASE}{OFFICIAL_MONTH}/{filename}'
             zp = Path(td) / filename
-            print(f'[{pos}/{len(filenames)}] Baixando {filename}...', flush=True)
-            try:
-                download(url, zp)
-                with zipfile.ZipFile(zp) as z:
-                    member = z.namelist()[0]
-                    with z.open(member) as raw:
-                        reader = csv.reader(io.TextIOWrapper(raw, encoding='latin1', errors='ignore'), delimiter=';')
-                        for row in reader:
-                            if len(row) < 6 or row[1].strip() != '2':
-                                continue
-                            name_key = norm_name(row[2])
-                            if name_key not in owners:
-                                continue
-                            cnpj_basic = row[0].strip()
-                            qual_code = row[4].strip()
-                            qual = qualifications.get(qual_code, f'Código {qual_code}' if qual_code else '')
-                            entered = fmt_date(row[5])
-                            sig = (cnpj_basic, qual, entered)
-                            totals[name_key] += 1
-                            if sig not in seen[name_key] and len(items[name_key]) < MAX_ITEMS_PER_NAME:
-                                seen[name_key].add(sig)
-                                items[name_key].append(list(sig))
-                print(filename, 'processado; matches acumulados:', sum(totals.values()), flush=True)
-            except Exception as exc:
-                print('ERRO em', filename, exc, flush=True)
-                raise
-            finally:
-                try:
-                    zp.unlink(missing_ok=True)
-                except Exception:
-                    pass
-    return totals, items
+            print(f'[{i+1}/10] Baixando {filename}...', flush=True)
+            if not curl_download(url, zp, attempts=4):
+                raise RuntimeError(f'Falha ao baixar {filename} da Receita Federal')
+            with zipfile.ZipFile(zp) as z:
+                member = z.namelist()[0]
+                with z.open(member) as raw:
+                    reader = csv.reader(io.TextIOWrapper(raw, encoding='latin1', errors='ignore'), delimiter=';')
+                    for row in reader:
+                        if len(row) < 6 or row[1].strip() != '2':
+                            continue
+                        name_key = norm_name(row[2])
+                        if name_key not in owners:
+                            continue
+                        cnpj_basic = row[0].strip()
+                        qual_code = row[4].strip()
+                        qual = qualifications.get(qual_code, f'Código {qual_code}' if qual_code else '')
+                        entered = fmt_date(row[5])
+                        sig = (cnpj_basic, qual, entered)
+                        totals[name_key] += 1
+                        if sig not in seen[name_key] and len(items[name_key]) < MAX_ITEMS_PER_NAME:
+                            seen[name_key].add(sig)
+                            items[name_key].append(list(sig))
+            zp.unlink(missing_ok=True)
+            print(filename, 'processado; matches acumulados:', sum(totals.values()), flush=True)
+    return totals, items, {
+        'fonte': 'Receita Federal do Brasil - Dados Abertos CNPJ / QSA',
+        'referencia': OFFICIAL_MONTH,
+        'modo': 'oficial-direto',
+    }
 
 
-def main():
-    rows, owners = read_nyc_names()
-    month, page_html = discover_latest_month()
-    print('Referência RFB selecionada:', month, flush=True)
-
+def process_brasilio(owners):
+    """Fallback quando o host oficial não aceita conexão do GitHub Actions."""
+    totals = defaultdict(int)
+    items = defaultdict(list)
+    seen = defaultdict(set)
     with tempfile.TemporaryDirectory() as td:
-        qualifications = load_qualifications(month, td)
+        gz = Path(td) / 'socios.csv.gz'
+        print('Host oficial indisponível no runner. Usando espelho Brasil.IO da base QSA.', flush=True)
+        if not curl_download(BRASILIO_URL, gz, attempts=5, connect_timeout=30, max_time=5400):
+            raise RuntimeError('Falha também no download do espelho Brasil.IO')
+        with gzip.open(gz, 'rt', encoding='utf-8', errors='ignore', newline='') as f:
+            reader = csv.DictReader(f)
+            print('Colunas Brasil.IO:', reader.fieldnames, flush=True)
+            for n, row in enumerate(reader, 1):
+                nome = row.get('nome_socio') or row.get('nome_razao_social_socio') or ''
+                name_key = norm_name(nome)
+                if name_key not in owners:
+                    continue
+                tipo = (row.get('tipo_socio') or '').strip()
+                if tipo and 'FISICA' not in norm_name(tipo):
+                    continue
+                cnpj = (row.get('cnpj') or '').strip()
+                cnpj_basic = re.sub(r'\D', '', cnpj)[:8]
+                qual = (row.get('qualificacao_socio') or '').strip()
+                sig = (cnpj_basic, qual, '')
+                totals[name_key] += 1
+                if sig not in seen[name_key] and len(items[name_key]) < MAX_ITEMS_PER_NAME:
+                    seen[name_key].add(sig)
+                    items[name_key].append(list(sig))
+                if n % 5000000 == 0:
+                    print(f'{n:,} linhas processadas; matches: {sum(totals.values()):,}', flush=True)
+    return totals, items, {
+        'fonte': 'Brasil.IO - espelho de dados da Receita Federal do Brasil / QSA',
+        'referencia': BRASILIO_REFERENCE,
+        'modo': 'espelho-contingencia',
+    }
 
-    totals, items = process_socios(month, page_html, owners, qualifications)
+
+def write_result(rows, owners, totals, items, source):
     matches = {}
     for key in sorted(totals):
         matches[key] = {
@@ -229,25 +198,37 @@ def main():
             'total': totals[key],
             'itens': items[key],
         }
-
     property_matches = sum(1 for row in rows if norm_name(row[0]) in matches)
+    aviso = 'Correspondência de nome não confirma identidade, nacionalidade ou que se trate da mesma pessoa. CPF não é publicado por este sistema.'
+    if source.get('modo') == 'espelho-contingencia':
+        aviso += ' O host oficial da Receita estava inacessível ao GitHub Actions; foi usado um snapshot histórico do Brasil.IO, explicitamente identificado pela data de referência.'
     payload = {
         'meta': {
-            'fonte': 'Receita Federal do Brasil - Dados Abertos CNPJ / Quadro de Sócios e Administradores (QSA)',
-            'referencia': month,
+            **source,
             'gerado_em': datetime.now(timezone.utc).isoformat(timespec='seconds'),
             'criterio': 'nome completo normalizado em correspondência exata; somente sócio pessoa física',
             'nomes_nyc_unicos': len(owners),
             'nomes_com_correspondencia': len(matches),
             'imoveis_com_correspondencia': property_matches,
             'limite_detalhes_por_nome': MAX_ITEMS_PER_NAME,
-            'aviso': 'Correspondência de nome não confirma identidade, nacionalidade ou que se trate da mesma pessoa. CPF não é publicado por este sistema.'
+            'aviso': aviso,
         },
         'matches': matches,
     }
     content = 'window.RFB_QSA=' + json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + ';\n'
     (ROOT / 'receita_matches.js').write_text(content, encoding='utf-8')
     print('Gerado receita_matches.js | nomes:', len(matches), '| imóveis:', property_matches, flush=True)
+
+
+def main():
+    rows, owners = read_nyc_names()
+    if official_host_usable():
+        print('Host oficial acessível. Processando snapshot oficial', OFFICIAL_MONTH, flush=True)
+        totals, items, source = process_official(owners)
+    else:
+        print('Host oficial da Receita não responde ao GitHub Actions. Ativando fallback.', flush=True)
+        totals, items, source = process_brasilio(owners)
+    write_result(rows, owners, totals, items, source)
 
 
 if __name__ == '__main__':
