@@ -12,10 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RFB_BASE = 'https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/'
+# A Receita passou a servir o índice atual em /cnpj/dados_abertos_cnpj/.
+# O caminho antigo /dados/cnpj/dados_abertos_cnpj/ está retornando 404 no GitHub Actions.
+RFB_BASE = 'https://arquivos.receitafederal.gov.br/cnpj/dados_abertos_cnpj/'
 FALLBACK_MONTH = '2026-01'
 MAX_ITEMS_PER_NAME = 20
-UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.2)'
+UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.3)'
 
 
 def norm_name(value):
@@ -27,12 +29,7 @@ def norm_name(value):
 
 
 def fetch_text(url, attempts=4):
-    """Busca páginas pequenas com curl e novas tentativas.
-
-    O host da Receita às vezes demora para aceitar conexão a partir do
-    GitHub Actions. Não usamos urllib aqui porque um timeout isolado encerrava
-    todo o workflow antes mesmo de começar a baixar os arquivos de sócios.
-    """
+    """Busca páginas pequenas com curl e novas tentativas."""
     for attempt in range(1, attempts + 1):
         print(f'Consultando {url} ({attempt}/{attempts})', flush=True)
         cmd = [
@@ -55,12 +52,7 @@ def fetch_text(url, attempts=4):
 
 
 def discover_latest_month():
-    """Tenta descobrir a publicação mais nova, mas nunca bloqueia o cruzamento.
-
-    Se a listagem de diretórios da Receita estiver lenta/indisponível,
-    seguimos diretamente com uma referência conhecida e existente. O
-    processamento dos Socios*.zip não depende da página HTML.
-    """
+    """Tenta descobrir a publicação mais nova, sem bloquear o cruzamento."""
     try:
         html = fetch_text(RFB_BASE, attempts=2)
         months = sorted(set(re.findall(r'href=["\'](20\d{2}-\d{2})/["\']', html)), reverse=True)
@@ -133,7 +125,8 @@ def download(url, path, attempts=6):
             path.unlink(missing_ok=True)
         else:
             print(f'curl retornou código {proc.returncode}.', flush=True)
-            if proc.returncode == 33:
+            # HTTP 404/403 não será corrigido com retomada de arquivo parcial.
+            if proc.returncode in (22, 33):
                 path.unlink(missing_ok=True)
 
         if attempt < attempts:
