@@ -2,8 +2,9 @@ import csv
 import io
 import json
 import re
-import shutil
+import subprocess
 import tempfile
+import time
 import unicodedata
 import urllib.request
 import zipfile
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RFB_BASE = 'https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/'
 FALLBACK_MONTH = '2026-01'
 MAX_ITEMS_PER_NAME = 20
-UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.0)'
+UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.1)'
 
 
 def norm_name(value):
@@ -26,7 +27,7 @@ def norm_name(value):
     return re.sub(r'\s+', ' ', s).strip()
 
 
-def fetch_text(url, timeout=90):
+def fetch_text(url, timeout=180):
     req = urllib.request.Request(url, headers={'User-Agent': UA})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode('utf-8', 'ignore')
@@ -42,9 +43,9 @@ def discover_latest_month():
                 if 'Socios0.zip' in page or 'Socios1.zip' in page:
                     return month, page
             except Exception as exc:
-                print('Ignorando', month, exc)
+                print('Ignorando', month, exc, flush=True)
     except Exception as exc:
-        print('Falha ao descobrir mês mais recente:', exc)
+        print('Falha ao descobrir mês mais recente:', exc, flush=True)
     page = fetch_text(f'{RFB_BASE}{FALLBACK_MONTH}/')
     return FALLBACK_MONTH, page
 
@@ -66,14 +67,55 @@ def read_nyc_names():
         key = norm_name(original)
         if key and len(key.split()) >= 2:
             owners[key].add(original)
-    print('Registros NYC:', len(rows), '| nomes normalizados únicos:', len(owners))
+    print('Registros NYC:', len(rows), '| nomes normalizados únicos:', len(owners), flush=True)
     return rows, owners
 
 
-def download(url, path):
-    req = urllib.request.Request(url, headers={'User-Agent': UA})
-    with urllib.request.urlopen(req, timeout=240) as src, open(path, 'wb') as dst:
-        shutil.copyfileobj(src, dst, length=1024 * 1024)
+def download(url, path, attempts=6):
+    """Download grande com retomada e novas tentativas.
+
+    A base de Sócios da RFB possui arquivos com centenas de MB e o servidor
+    ocasionalmente interrompe conexões longas. curl é mais tolerante que
+    urllib para esse cenário e permite retomar um arquivo parcial.
+    """
+    path = Path(path)
+    for attempt in range(1, attempts + 1):
+        resume = path.exists() and path.stat().st_size > 0
+        print(
+            f'Download tentativa {attempt}/{attempts}: {url}' +
+            (f' | retomando de {path.stat().st_size:,} bytes' if resume else ''),
+            flush=True,
+        )
+        cmd = [
+            'curl', '--fail', '--location', '--progress-bar',
+            '--connect-timeout', '30',
+            '--max-time', '2400',
+            '--speed-time', '180', '--speed-limit', '1024',
+            '--user-agent', UA,
+        ]
+        if resume:
+            cmd += ['--continue-at', '-']
+        cmd += ['--output', str(path), url]
+
+        proc = subprocess.run(cmd)
+        if proc.returncode == 0:
+            if path.suffix.lower() != '.zip' or zipfile.is_zipfile(path):
+                print(f'Download concluído: {path.name} ({path.stat().st_size:,} bytes)', flush=True)
+                return
+            print(f'Arquivo inválido após download: {path.name}; reiniciando.', flush=True)
+            path.unlink(missing_ok=True)
+        else:
+            print(f'curl retornou código {proc.returncode}.', flush=True)
+            # 33 = servidor não aceitou retomada. Recomeça do zero.
+            if proc.returncode == 33:
+                path.unlink(missing_ok=True)
+
+        if attempt < attempts:
+            wait = min(20 * attempt, 90)
+            print(f'Aguardando {wait}s antes de nova tentativa...', flush=True)
+            time.sleep(wait)
+
+    raise RuntimeError(f'Falha ao baixar {url} após {attempts} tentativas')
 
 
 def load_qualifications(month, tmpdir):
@@ -81,7 +123,7 @@ def load_qualifications(month, tmpdir):
     url = f'{RFB_BASE}{month}/Qualificacoes.zip'
     zp = Path(tmpdir) / 'Qualificacoes.zip'
     try:
-        download(url, zp)
+        download(url, zp, attempts=4)
         with zipfile.ZipFile(zp) as z:
             member = z.namelist()[0]
             with z.open(member) as raw:
@@ -90,7 +132,7 @@ def load_qualifications(month, tmpdir):
                     if len(row) >= 2:
                         out[row[0].strip()] = row[1].strip()
     except Exception as exc:
-        print('Não foi possível carregar qualificações:', exc)
+        print('Não foi possível carregar qualificações:', exc, flush=True)
     return out
 
 
@@ -117,7 +159,7 @@ def process_socios(month, page_html, owners, qualifications):
         for pos, filename in enumerate(filenames, 1):
             url = f'{RFB_BASE}{month}/{filename}'
             zp = Path(td) / filename
-            print(f'[{pos}/{len(filenames)}] Baixando {filename}...')
+            print(f'[{pos}/{len(filenames)}] Baixando {filename}...', flush=True)
             try:
                 download(url, zp)
                 with zipfile.ZipFile(zp) as z:
@@ -141,9 +183,9 @@ def process_socios(month, page_html, owners, qualifications):
                             if sig not in seen[name_key] and len(items[name_key]) < MAX_ITEMS_PER_NAME:
                                 seen[name_key].add(sig)
                                 items[name_key].append(list(sig))
-                print(filename, 'processado; matches acumulados:', sum(totals.values()))
+                print(filename, 'processado; matches acumulados:', sum(totals.values()), flush=True)
             except Exception as exc:
-                print('ERRO em', filename, exc)
+                print('ERRO em', filename, exc, flush=True)
                 raise
             finally:
                 try:
@@ -156,7 +198,7 @@ def process_socios(month, page_html, owners, qualifications):
 def main():
     rows, owners = read_nyc_names()
     month, page_html = discover_latest_month()
-    print('Referência RFB selecionada:', month)
+    print('Referência RFB selecionada:', month, flush=True)
 
     with tempfile.TemporaryDirectory() as td:
         qualifications = load_qualifications(month, td)
@@ -187,7 +229,7 @@ def main():
     }
     content = 'window.RFB_QSA=' + json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + ';\n'
     (ROOT / 'receita_matches.js').write_text(content, encoding='utf-8')
-    print('Gerado receita_matches.js | nomes:', len(matches), '| imóveis:', property_matches)
+    print('Gerado receita_matches.js | nomes:', len(matches), '| imóveis:', property_matches, flush=True)
 
 
 if __name__ == '__main__':
