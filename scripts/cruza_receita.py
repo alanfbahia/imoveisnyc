@@ -6,7 +6,6 @@ import subprocess
 import tempfile
 import time
 import unicodedata
-import urllib.request
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -16,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RFB_BASE = 'https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/'
 FALLBACK_MONTH = '2026-01'
 MAX_ITEMS_PER_NAME = 20
-UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.1)'
+UA = 'Mozilla/5.0 (compatible; imoveisnyc-rfb-crossmatch/1.2)'
 
 
 def norm_name(value):
@@ -27,27 +26,59 @@ def norm_name(value):
     return re.sub(r'\s+', ' ', s).strip()
 
 
-def fetch_text(url, timeout=180):
-    req = urllib.request.Request(url, headers={'User-Agent': UA})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode('utf-8', 'ignore')
+def fetch_text(url, attempts=4):
+    """Busca páginas pequenas com curl e novas tentativas.
+
+    O host da Receita às vezes demora para aceitar conexão a partir do
+    GitHub Actions. Não usamos urllib aqui porque um timeout isolado encerrava
+    todo o workflow antes mesmo de começar a baixar os arquivos de sócios.
+    """
+    for attempt in range(1, attempts + 1):
+        print(f'Consultando {url} ({attempt}/{attempts})', flush=True)
+        cmd = [
+            'curl', '--fail', '--location', '--silent', '--show-error',
+            '--connect-timeout', '30', '--max-time', '120',
+            '--retry', '2', '--retry-delay', '8', '--retry-all-errors',
+            '--user-agent', UA, url,
+        ]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout.decode('utf-8', 'ignore')
+        print(
+            f'Falha ao consultar página (curl {proc.returncode}): '
+            + proc.stderr.decode('utf-8', 'ignore')[-500:],
+            flush=True,
+        )
+        if attempt < attempts:
+            time.sleep(15 * attempt)
+    raise RuntimeError(f'Falha ao consultar {url}')
 
 
 def discover_latest_month():
+    """Tenta descobrir a publicação mais nova, mas nunca bloqueia o cruzamento.
+
+    Se a listagem de diretórios da Receita estiver lenta/indisponível,
+    seguimos diretamente com uma referência conhecida e existente. O
+    processamento dos Socios*.zip não depende da página HTML.
+    """
     try:
-        html = fetch_text(RFB_BASE)
+        html = fetch_text(RFB_BASE, attempts=2)
         months = sorted(set(re.findall(r'href=["\'](20\d{2}-\d{2})/["\']', html)), reverse=True)
         for month in months[:12]:
             try:
-                page = fetch_text(f'{RFB_BASE}{month}/')
+                page = fetch_text(f'{RFB_BASE}{month}/', attempts=2)
                 if 'Socios0.zip' in page or 'Socios1.zip' in page:
                     return month, page
             except Exception as exc:
                 print('Ignorando', month, exc, flush=True)
     except Exception as exc:
-        print('Falha ao descobrir mês mais recente:', exc, flush=True)
-    page = fetch_text(f'{RFB_BASE}{FALLBACK_MONTH}/')
-    return FALLBACK_MONTH, page
+        print('Não foi possível descobrir o mês mais recente:', exc, flush=True)
+
+    print(
+        'Usando referência de contingência', FALLBACK_MONTH,
+        'sem consultar a página do diretório.', flush=True,
+    )
+    return FALLBACK_MONTH, ''
 
 
 def read_nyc_names():
@@ -72,12 +103,7 @@ def read_nyc_names():
 
 
 def download(url, path, attempts=6):
-    """Download grande com retomada e novas tentativas.
-
-    A base de Sócios da RFB possui arquivos com centenas de MB e o servidor
-    ocasionalmente interrompe conexões longas. curl é mais tolerante que
-    urllib para esse cenário e permite retomar um arquivo parcial.
-    """
+    """Download grande com retomada e novas tentativas."""
     path = Path(path)
     for attempt in range(1, attempts + 1):
         resume = path.exists() and path.stat().st_size > 0
@@ -91,6 +117,7 @@ def download(url, path, attempts=6):
             '--connect-timeout', '30',
             '--max-time', '2400',
             '--speed-time', '180', '--speed-limit', '1024',
+            '--retry', '3', '--retry-delay', '10', '--retry-all-errors',
             '--user-agent', UA,
         ]
         if resume:
@@ -106,7 +133,6 @@ def download(url, path, attempts=6):
             path.unlink(missing_ok=True)
         else:
             print(f'curl retornou código {proc.returncode}.', flush=True)
-            # 33 = servidor não aceitou retomada. Recomeça do zero.
             if proc.returncode == 33:
                 path.unlink(missing_ok=True)
 
@@ -150,6 +176,7 @@ def process_socios(month, page_html, owners, qualifications):
     )
     if not filenames:
         filenames = [f'Socios{i}.zip' for i in range(10)]
+        print('Usando lista padrão Socios0.zip ... Socios9.zip', flush=True)
 
     totals = defaultdict(int)
     items = defaultdict(list)
@@ -167,10 +194,8 @@ def process_socios(month, page_html, owners, qualifications):
                     with z.open(member) as raw:
                         reader = csv.reader(io.TextIOWrapper(raw, encoding='latin1', errors='ignore'), delimiter=';')
                         for row in reader:
-                            # Layout público Sócios: 0 CNPJ básico; 1 identificador; 2 nome;
-                            # 3 CPF/CNPJ do sócio; 4 qualificação; 5 data de entrada; ...
                             if len(row) < 6 or row[1].strip() != '2':
-                                continue  # somente pessoa física
+                                continue
                             name_key = norm_name(row[2])
                             if name_key not in owners:
                                 continue
