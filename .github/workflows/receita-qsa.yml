@@ -9,25 +9,59 @@ on:
     types: [completed]
   push:
     paths:
-      - 'scripts/cruza_receita.py'
+      - 'scripts/cruza_receita_2026_chunk.py'
+      - 'scripts/merge_receita_2026.py'
       - '.github/workflows/receita-qsa.yml'
 
 permissions:
   contents: write
 
+env:
+  RFB_REFERENCE: '2026-01'
+
 jobs:
   crossmatch:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        part: [0,1,2,3,4,5,6,7,8,9]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Cruzar proprietários NYC com QSA da Receita Federal
-        run: python scripts/cruza_receita.py
-      - name: Publicar resultado do cruzamento
+      - name: Processar Socios${{ matrix.part }}.zip da Receita Federal 2026
+        run: python scripts/cruza_receita_2026_chunk.py --part ${{ matrix.part }}
+      - name: Salvar resultado da parte ${{ matrix.part }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rfb-2026-part-${{ matrix.part }}
+          path: rfb_chunks/part_${{ matrix.part }}.json
+          if-no-files-found: error
+          retention-days: 3
+
+  merge:
+    needs: crossmatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Baixar as 10 partes processadas
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rfb-2026-part-*
+          path: rfb_chunks
+          merge-multiple: true
+      - name: Consolidar base oficial RFB 2026
+        run: python scripts/merge_receita_2026.py
+      - name: Publicar resultado oficial de 2026
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -35,6 +69,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "Sem alterações no cruzamento"
           else
-            git commit -m "Atualiza cruzamento com Receita Federal CNPJ QSA"
+            git commit -m "Atualiza cruzamento oficial Receita Federal QSA 2026"
+            git pull --rebase origin main
             git push
           fi
